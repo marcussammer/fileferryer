@@ -1,15 +1,37 @@
 import { expect } from '@esm-bundle/chai';
 
+const createHandleStub = (name, kind = 'directory') => ({
+  name,
+  kind
+});
+
 describe('file storage module smoke', () => {
-  it('initializes the registry and writes a key', async () => {
-    const { default: fileStorageModule } = await import('../js/fileStorageModule.mjs');
+  it('persists native handles, lists them, and removes them', async () => {
+    const { default: fileStorageModule } = await import(
+      '../js/fileStorageModule.mjs'
+    );
 
-    const registry = await fileStorageModule.init();
-    const { key } = await registry.registerKey(undefined, {
-      storageType: 'test-smoke'
-    });
+    await fileStorageModule.init();
 
-    const record = await registry.getRecord(key);
-    expect(record).to.deep.include({ key, storageType: 'test-smoke' });
+    const fakeHandles = [
+      createHandleStub('photos', 'directory'),
+      createHandleStub('videos', 'directory'),
+      createHandleStub('clip.mp4', 'file')
+    ];
+
+    const persisted = await fileStorageModule.nativeHandles.persistHandles(
+      fakeHandles
+    );
+    expect(persisted.ok).to.equal(true);
+    expect(persisted.storageType).to.equal('native-handle');
+
+    const keys = await fileStorageModule.registry.listKeys();
+    expect(keys).to.include(persisted.key);
+
+    const removal = await fileStorageModule.nativeHandles.remove(persisted.key);
+    expect(removal.ok).to.equal(true);
+
+    const finalKeys = await fileStorageModule.registry.listKeys();
+    expect(finalKeys).to.not.include(persisted.key);
   });
 });

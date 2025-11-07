@@ -7,54 +7,177 @@
       :root {
         font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
           sans-serif;
-        background: #1a1a1a;
-        color: #f5f5f5;
+        background: #0f172a;
+        color: #e2e8f0;
       }
       body {
         margin: 0;
         min-height: 100vh;
-        display: grid;
-        place-items: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
       }
       .card {
+        width: min(960px, 100%);
         padding: 2rem;
         border-radius: 0.75rem;
-        background: rgba(255, 255, 255, 0.05);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
-        text-align: center;
+        background: rgba(15, 23, 42, 0.9);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin-top: 0;
+        margin-bottom: 0.5rem;
+        font-size: 1.75rem;
+      }
+      p {
+        margin-top: 0;
       }
       .status {
-        font-size: 1.25rem;
-        margin-top: 0.5rem;
+        font-size: 1rem;
+        margin-bottom: 1rem;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+      }
+      button {
+        padding: 0.5rem 0.75rem;
+        background: #2563eb;
+        border: none;
+        color: white;
+        border-radius: 0.4rem;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin: 0;
+        max-height: 320px;
+        overflow: auto;
+        font-size: 0.85rem;
       }
     </style>
   </head>
   <body>
     <div class="card">
       <h1>File Storage Module Smoke Test</h1>
+      <p>
+        Use the buttons below with Chromium to verify native handle persistence.
+        Select a directory, reload, and request permissions to ensure handles
+        survive the round-trip. Keep an eye on the log for success/failure
+        messages.
+      </p>
       <p class="status" id="status">Initializing…</p>
+      <div class="controls">
+        <button id="addSelection">Add Native Selection</button>
+        <button id="listKeys">List Keys</button>
+        <button id="requestAccess" disabled>Request Permissions</button>
+        <button id="removeSelection" disabled>Remove Last Key</button>
+      </div>
+      <pre id="log">Waiting for initialization…</pre>
     </div>
     <script type="module">
       import fileStorageModule from '../js/fileStorageModule.mjs';
 
       const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const addButton = document.getElementById('addSelection');
+      const listButton = document.getElementById('listKeys');
+      const requestButton = document.getElementById('requestAccess');
+      const removeButton = document.getElementById('removeSelection');
+
+      let lastKey = null;
 
       const updateStatus = (message, isError = false) => {
         statusEl.textContent = message;
         statusEl.style.color = isError ? '#ff6b6b' : '#7df5a1';
       };
 
+      const log = (message, details) => {
+        const timestamp = new Date().toISOString();
+        const detailText =
+          details === undefined ? '' : `\n${JSON.stringify(details, null, 2)}`;
+        const entry = `[${timestamp}] ${message}${detailText}\n\n`;
+        logEl.textContent = entry + logEl.textContent;
+        console.info('[file-storage-module]', message, details);
+      };
+
+      const updateActionState = () => {
+        const hasKey = Boolean(lastKey);
+        requestButton.disabled = !hasKey;
+        removeButton.disabled = !hasKey;
+      };
+
+      const requirePickerSupport = () => {
+        if (!('showDirectoryPicker' in window)) {
+          throw new Error('showDirectoryPicker is not available in this browser');
+        }
+      };
+
+      addButton.addEventListener('click', async () => {
+        try {
+          requirePickerSupport();
+          const directoryHandle = await window.showDirectoryPicker();
+          const result = await fileStorageModule.nativeHandles.persistHandles([
+            directoryHandle
+          ]);
+          lastKey = result.key;
+          updateActionState();
+          log('Stored native selection', result);
+        } catch (error) {
+          log('Failed to store selection', { error: error?.message });
+          updateStatus('Add selection failed', true);
+        }
+      });
+
+      listButton.addEventListener('click', async () => {
+        const keys = await fileStorageModule.registry.listKeys();
+        log('Current registry keys', keys);
+        if (!keys.includes(lastKey)) {
+          lastKey = keys.at(-1) ?? null;
+          updateActionState();
+        }
+      });
+
+      requestButton.addEventListener('click', async () => {
+        if (!lastKey) return;
+        const response = await fileStorageModule.nativeHandles.requestPermissions(
+          lastKey
+        );
+        updateStatus(
+          `Permissions ${response.state} (${response.counts?.handles ?? 0} handles)`,
+          !response.ok
+        );
+        log('Permission request result', response);
+      });
+
+      removeButton.addEventListener('click', async () => {
+        if (!lastKey) return;
+        await fileStorageModule.nativeHandles.remove(lastKey);
+        log('Removed native selection', { key: lastKey });
+        lastKey = null;
+        updateActionState();
+      });
+
       fileStorageModule
         .init()
         .then(() => {
-          updateStatus('module loaded');
+          updateStatus('Module loaded');
           window.__fileStorageSmoke = { ok: true };
-          console.info('[file-storage-module] module loaded');
+          log('Module initialized');
         })
         .catch((error) => {
-          updateStatus('module failed');
+          updateStatus('Module failed');
           window.__fileStorageSmoke = { ok: false, error };
-          console.error('[file-storage-module] init failed', error);
+          log('Module initialization failed', { error: error?.message });
         });
     </script>
   </body>

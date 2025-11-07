@@ -12,12 +12,13 @@ Work the tickets from top to bottom unless otherwise noted. Update the checklist
    - Acceptance: `npm test` passes on a clean clone, the smoke page runs via `npm run test:smoke` without runtime errors, and the module initializes the IndexedDB scaffolding lazily.
    - Completed: `public/js/fileStorageModule.mjs` exports the registry + lazy IDB bootstrap, Vitest + happy-dom + fake-indexeddb are wired with a dedicated setup and registry specs, and `public/tests/file_storage_smoke.html` exercises the module through `npm run test:smoke` (note: the CLI cannot bind to ports inside this sandbox, so run locally to verify the smoke page).
 
-2. [ ] **Native handle backend**
+2. [x] **Native handle backend**
    - Implement native persistence: store/re-hydrate `FileSystemFileHandle` / `FileSystemDirectoryHandle` arrays in IndexedDB via structured clone, including metadata for counts and timestamps.
    - Provide `requestPermissions(key)` plumbing that callers can trigger inside a user gesture; return structured `{ ok, state }` responses for granted/denied/unknown outcomes.
    - Expand the Vitest suite with handle stubs that exercise permission success/failure, missing handles, and rehydration flows.
    - Update the smoke page + `npm run test:smoke` script to walk through a real Chromium add/list/remove cycle (manual button clicks are fine if permissions can’t be automated); log pass/fail to aid debugging.
    - Acceptance: All related Vitest suites pass headlessly, smoke page proves native handles persist through reload, and permission failures surface predictably.
+   - Completed: `createNativeHandleBackend` stores native selections (counts + timestamps), exposes `requestPermissions`, has dedicated Vitest coverage with handle stubs, and the smoke test/page now picks directories, lists keys, requests permissions, and removes selections end-to-end.
 
 3. [ ] **Transient session backend**
    - Implement the in-memory map for legacy inputs (Files, `webkitEntry`, etc.) with `beforeunload` cleanup and expiration messaging.
