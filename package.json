@@ -1,0 +1,26 @@
+{
+  "name": "fileferryer",
+  "version": "1.0.0",
+  "description": "Simple Express server that serves static files.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:smoke": "web-test-runner --config web-test-runner.config.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@esm-bundle/chai": "^4.3.4-fix.0",
+    "@web/test-runner": "^0.20.2",
+    "@web/test-runner-chrome": "^0.18.1",
+    "fake-indexeddb": "^6.2.5",
+    "happy-dom": "^17.6.1",
+    "vitest": "^3.2.4"
+  }
+}
