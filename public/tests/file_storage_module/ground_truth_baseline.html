@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ground Truth – Baseline</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.92);
+        border-radius: 0.75rem;
+        padding: 2rem;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 1rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 360px;
+        overflow: auto;
+      }
+      .summary-row {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.15);
+      }
+      .summary-row.pass .summary-status {
+        color: #4ade80;
+      }
+      .summary-row.fail .summary-status {
+        color: #f87171;
+      }
+      .summary-details {
+        display: block;
+        margin-top: 0.25rem;
+        font-size: 0.85rem;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+      ol {
+        margin-left: 1.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Ground Truth – Baseline</h1>
+      <p>
+        Use Chrome/Edge and pick the bundled directory at
+        <code>public/tests/file_storage_module/fixtures/ground-truth</code>. If the browser runs on a
+        different OS than the repo (e.g., Windows + WSL), copy that folder to an
+        accessible location first, then select the copied directory whenever
+        prompted.
+      </p>
+      <ol>
+        <li>Click <strong>Reset Registry</strong> if you need a clean slate.</li>
+        <li>Click <strong>Run Baseline</strong> and pick the ground-truth folder.</li>
+        <li>Follow the prompt to provide the same folder for transient mode.</li>
+        <li>
+          Review the pass/fail summary. If everything is green, proceed to the
+          Refresh harness.
+        </li>
+      </ol>
+      <p class="status" id="status">Idle</p>
+      <div>
+        <button id="runBaseline">Run Baseline</button>
+        <button id="resetRegistry">Reset Registry</button>
+        <a href="ground_truth_refresh.html" style="color: #93c5fd">Next: Refresh harness →</a>
+      </div>
+      <div id="summary"></div>
+      <pre id="log">Waiting…</pre>
+    </div>
+    <script type="module">
+      import fileStorageModule from '../../js/fileStorageModule.mjs';
+      import {
+        groundTruthCounts
+      } from './fixtures/groundTruthManifest.js';
+      import {
+        setupHarness,
+        clearRegistry,
+        compareCounts,
+        formatCounts
+      } from './harness/harnessUtils.js';
+
+      const harness = setupHarness();
+      const runBtn = document.getElementById('runBaseline');
+      const resetBtn = document.getElementById('resetRegistry');
+      const transientInput = document.createElement('input');
+      transientInput.type = 'file';
+      transientInput.multiple = true;
+      transientInput.webkitdirectory = true;
+      transientInput.directory = true;
+      transientInput.style.display = 'none';
+      document.body.appendChild(transientInput);
+
+      const pickDirectoryForNative = async () => {
+        if (!('showDirectoryPicker' in window)) {
+          throw new Error('showDirectoryPicker is not supported in this browser');
+        }
+        return window.showDirectoryPicker();
+      };
+
+      const runNativeFlow = async () => {
+        const directoryHandle = await pickDirectoryForNative();
+        const persisted = await fileStorageModule.add([directoryHandle]);
+        if (!persisted.ok || persisted.storageType !== 'native-handle') {
+          throw new Error(persisted.reason ?? 'Failed to store native selection');
+        }
+
+        compareCounts({
+          label: 'native.add',
+          counts: persisted.counts,
+          expected: groundTruthCounts,
+          report: harness.report,
+          includeHandles: true
+        });
+
+        const storageType = await fileStorageModule.getStorageType(persisted.key);
+        harness.report(
+          'native.getStorageType',
+          storageType.ok && storageType.storageType === 'native-handle',
+          JSON.stringify(storageType)
+        );
+
+        const exists = await fileStorageModule.exists(persisted.key);
+        harness.report('native.exists', exists.exists, exists.reason ?? '');
+
+        const fileCount = await fileStorageModule.getFileCount(persisted.key);
+        if (fileCount.ok) {
+          compareCounts({
+            label: 'native.getFileCount',
+            counts: fileCount.counts,
+            expected: groundTruthCounts,
+            report: harness.report,
+            includeHandles: true
+          });
+        } else {
+          harness.report('native.getFileCount', false, fileCount.reason ?? 'error');
+        }
+
+        const permissions = await fileStorageModule.requestPermissions(persisted.key);
+        harness.report(
+          'native.requestPermissions',
+          permissions.ok,
+          permissions.state ?? permissions.reason
+        );
+
+        return persisted.key;
+      };
+
+      const runTransientFlow = () =>
+        new Promise((resolve, reject) => {
+          transientInput.value = '';
+          transientInput.onchange = async () => {
+            const files = Array.from(transientInput.files ?? []);
+            if (!files.length) {
+              reject(new Error('No files selected for transient flow.'));
+              return;
+            }
+            try {
+              const persisted = await fileStorageModule.add(files);
+              if (!persisted.ok || persisted.storageType !== 'transient-session') {
+                throw new Error(persisted.reason ?? 'Transient add failed');
+              }
+              compareCounts({
+                label: 'transient.add',
+                counts: persisted.counts,
+                expected: groundTruthCounts,
+                report: harness.report
+              });
+
+              const storageType = await fileStorageModule.getStorageType(
+                persisted.key
+              );
+              harness.report(
+                'transient.getStorageType',
+                storageType.ok && storageType.storageType === 'transient-session',
+                JSON.stringify(storageType)
+              );
+
+              const exists = await fileStorageModule.exists(persisted.key);
+              harness.report('transient.exists', exists.exists, exists.reason ?? '');
+
+              const fileCount = await fileStorageModule.getFileCount(persisted.key);
+              if (fileCount.ok) {
+                compareCounts({
+                  label: 'transient.getFileCount',
+                  counts: fileCount.counts,
+                  expected: groundTruthCounts,
+                  report: harness.report
+                });
+              }
+
+              resolve(persisted.key);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          transientInput.click();
+        });
+
+      const resetRegistry = async () => {
+        resetBtn.disabled = true;
+        harness.setStatus('Resetting registry…');
+        try {
+          const removedKeys = await clearRegistry(fileStorageModule);
+          harness.log('registry.reset', { removedKeys });
+          harness.report('registry.reset', true, `${removedKeys.length} keys removed`);
+          harness.setStatus('Registry cleared', 'success');
+        } catch (error) {
+          harness.log('registry.reset.error', {
+            message: error?.message,
+            stack: error?.stack
+          });
+          harness.report('registry.reset', false, error?.message ?? 'Unknown error');
+          harness.setStatus('Reset failed', 'error');
+        } finally {
+          resetBtn.disabled = false;
+        }
+      };
+
+      resetBtn.addEventListener('click', resetRegistry);
+
+      runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        harness.resetSummary();
+        harness.setStatus('Running baseline…');
+        try {
+          await fileStorageModule.init();
+          const removed = await clearRegistry(fileStorageModule);
+          harness.log('registry.seed', { removed });
+          const nativeKey = await runNativeFlow();
+          const transientKey = await runTransientFlow();
+          const keys = await fileStorageModule.listKeys();
+          harness.log('api.listKeys', { keys });
+          harness.report('baseline.native.complete', true, `key ${nativeKey}`);
+          harness.report('baseline.transient.complete', true, `key ${transientKey}`);
+          harness.setStatus('Baseline complete – proceed to Refresh harness', 'success');
+        } catch (error) {
+          harness.log('baseline.error', {
+            message: error?.message,
+            stack: error?.stack
+          });
+          harness.report('baseline', false, error?.message ?? 'Unknown error');
+          harness.setStatus('Baseline failed', 'error');
+        } finally {
+          runBtn.disabled = false;
+        }
+      });
+
+      harness.log('baseline.ready', {
+        expectedCounts: formatCounts(groundTruthCounts)
+      });
+    </script>
+  </body>
+</html>

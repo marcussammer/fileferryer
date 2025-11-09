@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ground Truth – Multi-tab</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.92);
+        border-radius: 0.75rem;
+        padding: 2rem;
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 320px;
+        overflow: auto;
+      }
+      .summary-row {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.15);
+      }
+      .summary-row.pass .summary-status {
+        color: #4ade80;
+      }
+      .summary-row.fail .summary-status {
+        color: #f87171;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+      .ids {
+        margin: 1rem 0;
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        background: rgba(255, 255, 255, 0.05);
+      }
+      a {
+        color: #93c5fd;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Ground Truth – Multi-tab</h1>
+      <p>
+        After completing the Baseline harness, open this page in two tabs (or use
+        the browser’s “Duplicate Tab” option). Each tab shows its Browser ID and
+        Tab ID for reference. Workflow:
+      </p>
+      <ol>
+        <li>In Tab A, click <strong>Add Transient Selection</strong>.</li>
+        <li>
+          In Tab A, click <strong>Verify – Expect Present</strong> to confirm the
+          transient exists only in that tab.
+        </li>
+        <li>
+          Switch to Tab B (or the duplicated tab) and click
+          <strong>Verify – Expect Absent</strong> to prove transients do not leak
+          across tabs while native entries remain shared.
+        </li>
+      </ol>
+      <div class="ids" id="ids">Loading tab info…</div>
+      <p class="status" id="status">Idle</p>
+      <div>
+        <button id="addTransient">Add Transient Selection (this tab)</button>
+        <button id="verifyPresent">Verify – Expect Present</button>
+        <button id="verifyAbsent">Verify – Expect Absent</button>
+        <a href="ground_truth_mutations.html">Next: Native mutation harness →</a>
+        <a href="ground_truth_transient_mutations.html" style="margin-left:0.5rem;">or Transient mutation harness →</a>
+      </div>
+      <div id="summary"></div>
+      <pre id="log">Waiting…</pre>
+    </div>
+    <script type="module">
+      import fileStorageModule from '../../js/fileStorageModule.mjs';
+      import { groundTruthCounts } from './fixtures/groundTruthManifest.js';
+      import {
+        setupHarness,
+        compareCounts,
+        createTransientPicker,
+        assertTransientState
+      } from './harness/harnessUtils.js';
+      import { getBrowserTabID } from '../js/getBrowserTabID.js';
+
+      const harness = setupHarness();
+      const idsEl = document.getElementById('ids');
+      const addTransientBtn = document.getElementById('addTransient');
+      const verifyPresentBtn = document.getElementById('verifyPresent');
+      const verifyAbsentBtn = document.getElementById('verifyAbsent');
+      const pickTransient = createTransientPicker();
+
+      const renderIds = async () => {
+        try {
+          const ids = await getBrowserTabID();
+          idsEl.innerHTML = `
+            <div>Browser ID: <code>${ids.browserId}</code></div>
+            <div>Tab ID: <code>${ids.tabId}</code></div>
+            <p>Duplicate this tab and compare IDs. Browser IDs match; tab IDs should differ after the duplicate resolves.</p>
+          `;
+          harness.log('multitab.ids', ids);
+        } catch (error) {
+          idsEl.textContent = 'Unable to fetch tab IDs.';
+          harness.log('multitab.ids.error', { message: error?.message });
+        }
+      };
+
+      const verify = async ({ expectTransientEmpty }) => {
+        harness.setStatus('Verifying…');
+        harness.resetSummary();
+        try {
+          await fileStorageModule.init();
+          const keys = await fileStorageModule.listKeys({ includeTransient: false });
+          if (!keys.length) {
+            harness.report('registry', false, 'No native selections found.');
+            harness.setStatus('Missing baseline data', 'error');
+            return;
+          }
+          const record = await fileStorageModule.getFileCount(keys[0]);
+          compareCounts({
+            label: 'native.shared-across-tabs',
+            counts: record.ok ? record.counts : null,
+            expected: groundTruthCounts,
+            report: harness.report,
+            includeHandles: true
+          });
+
+          await assertTransientState({
+            fileStorageModule,
+            expectEmpty: expectTransientEmpty,
+            report: harness.report,
+            label: expectTransientEmpty
+              ? 'transient.expected-absent'
+              : 'transient.expected-present'
+          });
+          harness.setStatus('Verification complete', 'success');
+        } catch (error) {
+          harness.report('multitab.error', false, error?.message ?? 'Unknown error');
+          harness.setStatus('Verification failed', 'error');
+          harness.log('multitab.error', {
+            message: error?.message,
+            stack: error?.stack
+          });
+        }
+      };
+
+      addTransientBtn.addEventListener('click', async () => {
+        addTransientBtn.disabled = true;
+        harness.setStatus('Awaiting transient selection…');
+        try {
+          const files = await pickTransient();
+          const result = await fileStorageModule.add(files);
+          if (!result.ok || result.storageType !== 'transient-session') {
+            throw new Error(result.reason ?? 'Transient add failed');
+          }
+          compareCounts({
+            label: 'transient.add',
+            counts: result.counts,
+            expected: groundTruthCounts,
+            report: harness.report
+          });
+          harness.setStatus('Transient stored for this tab', 'success');
+        } catch (error) {
+          harness.report(
+            'transient.persistEntries',
+            false,
+            error?.message ?? 'Selection cancelled'
+          );
+          harness.setStatus('Transient selection failed', 'error');
+        } finally {
+          addTransientBtn.disabled = false;
+        }
+      });
+
+      verifyPresentBtn.addEventListener('click', () => {
+        verifyPresentBtn.disabled = true;
+        verify({ expectTransientEmpty: false }).finally(() => {
+          verifyPresentBtn.disabled = false;
+        });
+      });
+
+      verifyAbsentBtn.addEventListener('click', () => {
+        verifyAbsentBtn.disabled = true;
+        verify({ expectTransientEmpty: true }).finally(() => {
+          verifyAbsentBtn.disabled = false;
+        });
+      });
+
+      renderIds();
+      harness.log('multitab.ready', {
+        message: 'Open this page in multiple tabs before verifying.'
+      });
+    </script>
+  </body>
+</html>

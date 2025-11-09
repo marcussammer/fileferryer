@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ground Truth – Transient Mutations</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.92);
+        border-radius: 0.75rem;
+        padding: 2rem;
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 1rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 360px;
+        overflow: auto;
+      }
+      .summary-row {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.15);
+      }
+      .summary-row.pass .summary-status {
+        color: #4ade80;
+      }
+      .summary-row.fail .summary-status {
+        color: #f87171;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+      ul {
+        margin-left: 1.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Ground Truth – Transient Mutations</h1>
+      <p>
+        Transient selections capture <strong>File</strong> snapshots at the moment
+        of selection. They do <em>not</em> track later filesystem changes. Use this
+        page to see how those snapshots behave when files are modified, deleted,
+        or replaced before your app consumes them.
+      </p>
+      <ol>
+        <li>
+          Click <strong>Add Transient Selection</strong> and pick the copied
+          fixture directory. This stores the current <code>File</code> objects in
+          memory.
+        </li>
+        <li>
+          Optionally click <strong>Capture Baseline Snapshot</strong> to log the
+          initial names/lastModified/size values.
+        </li>
+        <li>
+          Manually mutate the directory (edit, delete, or replace files), then
+          click <strong>Capture Snapshot After Mutations</strong> to compare the
+          stored <code>File</code> objects against the new filesystem state.
+        </li>
+      </ol>
+      <p class="status" id="status">Idle</p>
+      <div class="controls">
+        <button id="addTransient">Add Transient Selection</button>
+        <button id="snapshotBaseline" disabled>Capture Baseline Snapshot</button>
+        <button id="snapshotMutated" disabled>Capture Snapshot After Mutations</button>
+      </div>
+      <div id="summary"></div>
+      <pre id="log">Waiting…</pre>
+    </div>
+    <script type="module">
+      import fileStorageModule from '../../js/fileStorageModule.mjs';
+      import {
+        setupHarness,
+        createTransientPicker
+      } from './harness/harnessUtils.js';
+
+      const harness = setupHarness();
+      const addBtn = document.getElementById('addTransient');
+      const snapshotBaselineBtn = document.getElementById('snapshotBaseline');
+      const snapshotMutatedBtn = document.getElementById('snapshotMutated');
+      const pickTransient = createTransientPicker();
+
+      let currentKey = null;
+
+      const captureSnapshot = async (label) => {
+        harness.setStatus('Capturing snapshot…');
+        harness.resetSummary();
+        try {
+          const exists = await fileStorageModule.exists(currentKey);
+          if (!exists.exists) {
+            harness.report(label, false, exists.reason ?? 'Transient expired');
+            harness.setStatus('Transient expired', 'error');
+            return;
+          }
+
+          const entries = fileStorageModule.transientSessions.getEntries(currentKey);
+          if (!entries) {
+            harness.report(label, false, 'Transient key expired – reselect');
+            harness.setStatus('Transient expired', 'error');
+            return;
+          }
+
+          const summary = entries.map((entry) => ({
+            name: entry.name,
+            size: entry.size,
+            lastModified: entry.lastModified,
+            type: entry.type
+          }));
+
+          harness.report(
+            `${label}.entries`,
+            true,
+            `${summary.length} files captured`
+          );
+          harness.log(`${label}.entries`, summary);
+          harness.setStatus('Snapshot captured', 'success');
+        } catch (error) {
+          harness.report(`${label}.error`, false, error?.message ?? 'Unknown error');
+          harness.setStatus('Snapshot failed', 'error');
+          harness.log(`${label}.error`, {
+            message: error?.message,
+            stack: error?.stack
+          });
+        }
+      };
+
+      addBtn.addEventListener('click', async () => {
+        addBtn.disabled = true;
+        harness.setStatus('Awaiting transient selection…');
+        try {
+          const files = await pickTransient();
+          const result = await fileStorageModule.add(files);
+          if (!result.ok || result.storageType !== 'transient-session') {
+            throw new Error(result.reason ?? 'Transient add failed');
+          }
+          currentKey = result.key;
+          harness.report('transient.add', true, `${result.counts.handles} handles stored`);
+          const storage = await fileStorageModule.getStorageType(result.key);
+          harness.log('transient.storageType', storage);
+          harness.setStatus('Transient stored; capture baseline snapshot next.', 'success');
+          snapshotBaselineBtn.disabled = false;
+          snapshotMutatedBtn.disabled = false;
+        } catch (error) {
+          harness.report(
+            'transient.persistEntries',
+            false,
+            error?.message ?? 'Selection cancelled'
+          );
+          harness.setStatus('Transient selection failed', 'error');
+        } finally {
+          addBtn.disabled = false;
+        }
+      });
+
+      snapshotBaselineBtn.addEventListener('click', () => {
+        snapshotBaselineBtn.disabled = true;
+        captureSnapshot('baseline').finally(() => {
+          snapshotBaselineBtn.disabled = false;
+        });
+      });
+
+      snapshotMutatedBtn.addEventListener('click', () => {
+        snapshotMutatedBtn.disabled = true;
+        captureSnapshot('mutated').finally(() => {
+          snapshotMutatedBtn.disabled = false;
+        });
+      });
+
+      harness.log('transient-mutations.ready', {
+        message:
+          'Select files, capture a baseline snapshot, mutate on disk, then capture again to compare.'
+      });
+    </script>
+  </body>
+</html>

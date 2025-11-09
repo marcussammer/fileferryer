@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ground Truth – Reopen</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.92);
+        border-radius: 0.75rem;
+        padding: 2rem;
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 320px;
+        overflow: auto;
+      }
+      .summary-row {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.15);
+      }
+      .summary-row.pass .summary-status {
+        color: #4ade80;
+      }
+      .summary-row.fail .summary-status {
+        color: #f87171;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+      a {
+        color: #93c5fd;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Ground Truth – Reopen</h1>
+      <p>
+        Use this page to confirm behavior across a full browser restart.
+        Workflow:
+      </p>
+      <ol>
+        <li>
+          Click <strong>Add Transient Selection</strong> (optional) to create a
+          session tied to this tab before closing the browser.
+        </li>
+        <li>
+          Close all tabs for this origin (or quit the browser), reopen it, and
+          return to this page.
+        </li>
+        <li>
+          Click <strong>Verify After Reopen</strong>. Native counts should match
+          the manifest, and transients should be gone.
+        </li>
+      </ol>
+      <p class="status" id="status">Idle</p>
+      <div>
+        <button id="addTransient">Add Transient Selection (this tab)</button>
+        <button id="verifyActive">Verify – Expect Active</button>
+        <button id="verifyButton">Verify After Reopen (Expect Cleared)</button>
+        <a href="ground_truth_multitab.html">Next: Multi-tab harness →</a>
+      </div>
+      <div id="summary"></div>
+      <pre id="log">Waiting…</pre>
+    </div>
+    <script type="module">
+      import fileStorageModule from '../../js/fileStorageModule.mjs';
+      import { groundTruthCounts } from './fixtures/groundTruthManifest.js';
+      import {
+        setupHarness,
+        compareCounts,
+        createTransientPicker,
+        assertTransientState
+      } from './harness/harnessUtils.js';
+
+      const harness = setupHarness();
+      const addTransientBtn = document.getElementById('addTransient');
+      const verifyActiveBtn = document.getElementById('verifyActive');
+      const verifyBtn = document.getElementById('verifyButton');
+      const pickTransient = createTransientPicker();
+
+      const verify = async ({ expectTransientEmpty }) => {
+        harness.setStatus('Verifying…');
+        harness.resetSummary();
+        try {
+            await fileStorageModule.init();
+            const keys = await fileStorageModule.listKeys({ includeTransient: false });
+            if (!keys.length) {
+              harness.report(
+                'registry',
+                false,
+                'No native selections found. Run baseline before testing reopen.'
+              );
+            } else {
+              const key = keys[0];
+              const permission = await fileStorageModule.requestPermissions(key);
+              harness.report(
+                'native.requestPermissions',
+                permission.ok,
+                permission.ok
+                  ? `state ${permission.state}`
+                  : `state ${permission.state ?? permission.reason}`
+              );
+
+              if (!permission.ok) {
+                harness.setStatus('Grant file access permission to continue.', 'error');
+              } else {
+                const record = await fileStorageModule.getFileCount(key);
+                compareCounts({
+                  label: 'native.persistence',
+                  counts: record.ok ? record.counts : null,
+                  expected: groundTruthCounts,
+                  report: harness.report,
+                  includeHandles: true
+                });
+              }
+            }
+
+            await assertTransientState({
+              fileStorageModule,
+              expectEmpty: expectTransientEmpty,
+              report: harness.report,
+              label: expectTransientEmpty
+                ? 'transient.after-reopen'
+                : 'transient.before-reopen'
+            });
+            harness.setStatus('Verification complete', 'success');
+        } catch (error) {
+          harness.report('reopen.error', false, error?.message ?? 'Unknown error');
+          harness.setStatus('Verification failed', 'error');
+          harness.log('reopen.error', {
+            message: error?.message,
+            stack: error?.stack
+          });
+        }
+      };
+
+      addTransientBtn.addEventListener('click', async () => {
+        addTransientBtn.disabled = true;
+        harness.setStatus('Awaiting transient selection…');
+        try {
+          const files = await pickTransient();
+          const result = await fileStorageModule.add(files);
+          if (!result.ok || result.storageType !== 'transient-session') {
+            throw new Error(result.reason ?? 'Transient add failed');
+          }
+          compareCounts({
+            label: 'transient.add',
+            counts: result.counts,
+            expected: groundTruthCounts,
+            report: harness.report
+          });
+          harness.setStatus('Transient stored for this tab', 'success');
+        } catch (error) {
+          harness.report(
+            'transient.persistEntries',
+            false,
+            error?.message ?? 'Selection cancelled'
+          );
+          harness.setStatus('Transient selection failed', 'error');
+        } finally {
+          addTransientBtn.disabled = false;
+        }
+      });
+
+      verifyActiveBtn.addEventListener('click', () => {
+        verifyActiveBtn.disabled = true;
+        verify({ expectTransientEmpty: false }).finally(() => {
+          verifyActiveBtn.disabled = false;
+        });
+      });
+
+      verifyBtn.addEventListener('click', () => {
+        verifyBtn.disabled = true;
+        verify({ expectTransientEmpty: true }).finally(() => {
+          verifyBtn.disabled = false;
+        });
+      });
+
+      harness.log('reopen.ready', {
+        note: 'Close and reopen the browser before clicking verify.'
+      });
+    </script>
+  </body>
+</html>

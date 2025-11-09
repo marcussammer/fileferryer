@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>File Storage Ground Truth Harness</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.9);
+        padding: 2rem;
+        border-radius: 0.75rem;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+      button {
+        padding: 0.75rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 420px;
+        overflow: auto;
+      }
+      .status {
+        margin-bottom: 1rem;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>File Storage Ground Truth Harness</h1>
+      <p>
+        Click "Run Tests" and pick the fixture directory at
+        <code>public/tests/file_storage_module/fixtures/ground-truth</code>. The harness will:
+      </p>
+      <ol>
+        <li>Request native access via <code>showDirectoryPicker</code>.</li>
+        <li>Persist handles, reload metadata, and compare counts.</li>
+        <li>Ask you to provide the same directory via the transient picker.</li>
+        <li>Print structured pass/fail logs for both flows.</li>
+      </ol>
+      <p class="status" id="status">Waiting…</p>
+      <button id="runButton">Run Tests</button>
+      <button id="resetButton" disabled>Reset Registry</button>
+      <pre id="log">Ready.</pre>
+    </div>
+    <script type="module">
+      import fileStorageModule from '../../js/fileStorageModule.mjs';
+      import {
+        groundTruthCounts,
+        groundTruthTree
+      } from './fixtures/groundTruthManifest.js';
+
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const runButton = document.getElementById('runButton');
+      const resetButton = document.getElementById('resetButton');
+
+      const transientInput = document.createElement('input');
+      transientInput.type = 'file';
+      transientInput.multiple = true;
+      transientInput.webkitdirectory = true;
+      transientInput.directory = true;
+      transientInput.style.display = 'none';
+      document.body.appendChild(transientInput);
+
+      const appendLog = (label, payload) => {
+        const entry = {
+          timestamp: new Date().toISOString(),
+          label,
+          ...payload
+        };
+        const text = `${JSON.stringify(entry, null, 2)}\n\n`;
+        logEl.textContent = text + logEl.textContent;
+        console.log('[ground-truth]', entry);
+      };
+
+      const compareCounts = (label, counts, { includeHandles = false } = {}) => {
+        const projectCounts = (source = {}) => {
+          const projected = {
+            files: source.files ?? 0,
+            directories: source.directories ?? 0
+          };
+          if (includeHandles && typeof source.handles === 'number') {
+            projected.handles = source.handles;
+          }
+          return projected;
+        };
+
+        const expected = projectCounts(groundTruthCounts);
+        const actual = projectCounts(counts ?? {});
+
+        const ok =
+          actual.files === expected.files &&
+          actual.directories === expected.directories &&
+          (!includeHandles || actual.handles === expected.handles);
+
+        appendLog(label, {
+          ok,
+          expected,
+          actual,
+          includeHandles
+        });
+        return ok;
+      };
+
+      const summarizeNativeRecord = async (key) => {
+        const result = await fileStorageModule.getFileCount(key);
+        if (!result.ok) {
+          return null;
+        }
+        return {
+          key,
+          counts: result.counts
+        };
+      };
+
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const runNativeFlow = async () => {
+        if (!('showDirectoryPicker' in window)) {
+          throw new Error('showDirectoryPicker is not supported in this browser');
+        }
+
+        const handle = await window.showDirectoryPicker();
+        const persisted = await fileStorageModule.add([handle]);
+        if (!persisted.ok) {
+          throw new Error(persisted.reason ?? 'Native add failed');
+        }
+
+        compareCounts('native.persistHandles', persisted.counts, { includeHandles: true });
+
+        const summary = await summarizeNativeRecord(persisted.key);
+        if (summary) {
+          compareCounts('native.getRecord', summary.counts, { includeHandles: true });
+        }
+
+        appendLog('native.requestPermissions', await fileStorageModule.requestPermissions(persisted.key));
+
+        return persisted.key;
+      };
+
+      const runTransientFlow = async () =>
+        new Promise((resolve, reject) => {
+          transientInput.value = '';
+
+          transientInput.onchange = async () => {
+            const files = Array.from(transientInput.files ?? []);
+            if (!files.length) {
+              reject(new Error('No files selected for transient flow'));
+              return;
+            }
+            try {
+              const persisted = await fileStorageModule.add(files);
+              if (!persisted.ok) {
+                throw new Error(persisted.reason ?? 'Transient add failed');
+              }
+              compareCounts('transient.persistEntries', persisted.counts);
+              resolve(persisted.key);
+            } catch (error) {
+              reject(error);
+            }
+          };
+
+          transientInput.click();
+        });
+
+      const resetHarness = async () => {
+        await fileStorageModule.init();
+        const keys = await fileStorageModule.listKeys({ includeTransient: false });
+        for (const key of keys) {
+          await fileStorageModule.remove(key);
+        }
+        appendLog('reset', { removedKeys: keys });
+      };
+
+      runButton.addEventListener('click', async () => {
+        runButton.disabled = true;
+        resetButton.disabled = true;
+        statusEl.textContent = 'Running…';
+        try {
+          await fileStorageModule.init();
+          await resetHarness();
+          const nativeKey = await runNativeFlow();
+          await sleep(250);
+          await runTransientFlow();
+          appendLog('native.remove', await fileStorageModule.remove(nativeKey));
+          statusEl.textContent = 'Completed. See log for details.';
+        } catch (error) {
+          statusEl.textContent = 'Failed – check log';
+          appendLog('error', { message: error?.message, stack: error?.stack });
+        } finally {
+          runButton.disabled = false;
+          resetButton.disabled = false;
+        }
+      });
+
+      resetButton.addEventListener('click', async () => {
+        resetButton.disabled = true;
+        await resetHarness();
+        statusEl.textContent = 'Registry cleared';
+        resetButton.disabled = false;
+      });
+
+      appendLog('ready', {
+        expected: groundTruthCounts,
+        fixture: groundTruthTree?.name
+      });
+      statusEl.textContent = 'Ready to run';
+    </script>
+  </body>
+</html>

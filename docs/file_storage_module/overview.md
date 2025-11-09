@@ -2,202 +2,79 @@
 
 ## Summary
 
-A small, reusable storage module that:
-- Accepts “file handles” produced by any picker/drag-drop method.
-- Persists them as robustly as the platform allows:
-- Chromium → persist real FileSystemFileHandle/FileSystemDirectoryHandle.
-- Non-Chromium → fall back to the “most robust” alternative (discussed below).
-- Returns a key on success for future access.
-- Exposes a tiny API:
-- add(handles) → { ok, key, storageType }
-- listKeys() → string[]
-- getStorageType(key) → "native-handle" | "snapshot" | "transient" | ...
-- exists(key) → boolean
-- getFileCount(key) → number
-- remove(key) → boolean
-- The design goal is simple, robust, reusable, with room to add read/enumerate APIs later.
+This module keeps track of file/directory selections in the browser without copying bytes. It exposes a small API that:
+- Accepts any picker output (File System Access handles, dragged `File` objects, or `webkitEntry` trees).
+- Persists Chromium selections as real `FileSystemHandle` objects in IndexedDB so they survive reloads, tab closes, and browser restarts.
+- Falls back to an in-memory “transient session” for browsers that cannot persist handles and makes it explicit that those keys vanish when the tab goes away.
+- Always returns an opaque key plus metadata so the caller can resume long transfers days later without reselecting files (assuming Chromium).
+
+There is no snapshot backend, no DOM coupling, and no hidden copies of user data—only handles.
 
 ## Use case
 
-For my application I am assuming large files (e.g. 100GB video files) and large directories (e.g. potentially over a hundred thousand photos), so the snapshot fallback won't work. Also, for my application, this is not intended for long-term storage, so the versioning and migrations are unnecessary. I guess I should just mention this is for a webrtc file transfer application, originally motivated by the need to transfer all the photos and videos from my mother's computer to my own after she passed away. So I need persistence over a day or two with possible browser closings etc. Slow connections may even require up to a week to transfer and there may be disconnects and reconnects, etc. Having a robust handle on the files is important because it's not like they are just selecting a few files and uploading all in a couple minutes. But on the other hand, it's not an application trying to do long term file management - after a transfer is complete that's it. I understand chromium is best, but there may be some situations where the program will be used to say transfer a single very large video file from a computer that only has safari. Allowing the user to attempt this, while warning they need to keep the tab open and not refresh, I think there is a use case for the legacy fallback (though not the snapshot backup)
-
-Got it—given your constraints (very large files, very large folders, no long-term archival, and Chromium-first with a **no-copy** policy), here’s how I’d shape the module.
-
-## Core stance
-
-* **No snapshot backend at all.** We never copy file data into storage. This avoids quota issues and respects 100GB+ files.
-* Two modes only:
-
-  1. **Native-handle (persistent)** — Chromium (Chrome/Edge) using `FileSystemFileHandle` / `FileSystemDirectoryHandle` saved in IndexedDB via structured clone. Survives reloads and closures; requires permission checks on return.
-  2. **Transient-session (non-persistent)** — “legacy” inputs (Safari/Firefox) via `File` objects or `webkitEntry` trees. These cannot be rehydrated after a reload, so they live in memory **only**; if the tab closes or reloads, the key becomes invalid. The module should **explicitly warn** the host app to inform users (“keep this tab open”).
-
-That’s it. Keep it simple and honest.
-
----
-
-## API surface (conceptual)
-
-* `add(handles, opts?) → { ok, key, storageType }`
-
-  * **Decides backend automatically**: if *all* inputs are true FSA handles, store persistently (“native-handle”). Otherwise, register a **transient session** and return that key with `storageType="transient-session"`.
-  * **No copies, no snapshots.**
-
-* `listKeys() → string[]`
-
-  * Keys visible in the **registry**. For transient keys, include them only while the page is alive.
-
-* `getStorageType(key) → "native-handle" | "transient-session"`
-
-* `exists(key, opts?) → boolean`
-
-  * For native: defaults to a registry-only lookup for speed. Pass `opts?.verifyPermissions === true` to run `queryPermission` before returning; if the handle is missing or permission isn’t `granted`, the method returns `false`.
-  * For transient: true only while this page context holds the in-memory entry; `verifyPermissions` is ignored because legacy objects don’t support it.
-
-* `getFileCount(key, traversalOpts?) → { ok, count, partial? }`
-
-  * **Fresh traversal** each time (no cheating).
-  * For native: traverse handles; if some entries fail (renamed/missing), return `partial:true`.
-  * For transient: traverse in-memory entries. If user navigates away → key invalid.
-  * Accepts an optional `TraversalOptions` object (`{ signal?, onProgress?, maxDepth? }`) so callers can cancel work or surface progress in the UI.
-
-* `remove(key) → { ok }`
-
-  * Deletes registry entry (and in-memory map for transient).
-
-* `requestPermissions(key) → { ok, state:"granted"|"denied" }`
-
-  * The host must call this in a **user gesture** (e.g., button click) to re-grant Chromium permissions.
-
-* (For later) non-breaking additions:
-
-  * `enumerate(key, opts) → AsyncIterator<{ path, kind, size, lastModified }>`
-  * `openFile(key, path) → File | Blob` (native returns `File` via `.getFile()`)
-  * `createReadableStream(key, path) → ReadableStream` (best match for WebRTC chunking)
-
----
-
-## Module boundaries & structure
-
-### Container + strategies (kept minimal)
-
-* **Container module** exposes the small API and owns:
-
-  * The **registry** (IndexedDB) for keys + metadata.
-  * **Capability detection** and backend routing.
-  * Basic **error mapping** (`permission`, `unsupported`, `not-found`, `disconnected`, `internal`).
-* **Backends**:
-
-  * `NativeHandleBackend` (“native-handle”):
-
-    * Stores arrays of `FileSystemHandle`s (files and/or directories) in IDB.
-    * On access: permission checks (`queryPermission` → optional `requestPermission`).
-    * Traversal via `directoryHandle.entries()` recursion.
-    * De-dupe with `isSameEntry` when users add overlapping folders.
-    * Failure semantics: if a handle no longer resolves, skip and mark `partial:true`.
-  * `TransientSessionBackend` (“transient-session”):
-
-    * Keeps the selection **only in memory** (e.g., a `Map<key, SessionSelection>`).
-    * Writes a lightweight tombstone to IDB (`{ key, storageType:"transient-session", status:"expired" }`) when the page unloads so `listKeys()` can explain why a key disappeared and `exists` can return `false` with `reason:"transient-expired"`.
-    * On page `beforeunload`, it removes the in-memory entry and records the tombstone.
-
-**Why not separate packages per backend?**
-You could, but for your scope (two strategies, no migrations), keeping them in one package keeps things **simpler, testable, and easier to version**. If you later add more storage modes, you can split.
-
----
-
-## Behavior details aligned to your use case
-
-### Large trees (100k+ photos) & performance
-
-* Traversal can be expensive. Provide `TraversalOptions` (shared between `getFileCount` and future enumeration APIs):
-
-  * `signal?: AbortSignal` to cancel scans (user navigated).
-  * `onProgress?: (filesScanned) => void` to keep the UI responsive.
-  * `maxDepth?: number` (usually unlimited for you).
-* **Counting**: always perform a fresh recount. No caching layer exists, so `getFileCount` recomputes every time while still honoring any provided `TraversalOptions`.
-
-### Huge files (100GB video)
-
-* Your module won’t touch data bytes—only **handles**—so storage is negligible.
-* When you add reading later, prefer **streaming** APIs and chunked reads (e.g., `File.stream()`), with **backpressure** surfaced to your WebRTC sender.
-
-### Permissions & resilience (Chromium)
-
-* First add: request permissions (the host should call `requestPermissions(key)` from a user gesture).
-* On later visits: `getFileCount` should **only query**, not request. If `prompt`/`denied`, return a “needs permission” status so the UI can show a “Grant access” button.
-
-### Drift (move/rename/delete)
-
-* Expect it. Counts and enumeration should **gracefully skip** vanished entries and report `partial:true`.
-* Consider an optional **“heal”** operation later (user repicks a folder to reconstitute the selection). This is tracked as a backlog item so you can decide post-MVP.
-
-### Multi-directory selections
-
-* The module accepts **arrays** of mixed handles and stores them as one selection under a single key.
-* Internally, normalize to a flat set of roots (files or directories) and always de-duplicate via `isSameEntry` so repeated folder selections don’t inflate counts.
-
-### Safari/Firefox (transient)
-
-* You’re right: there’s real value in allowing a **single huge file** transfer as **transient** on Safari.
-* The module should surface:
-
-  * `storageType="transient-session"` on `add`.
-  * `getFileCount` works **only** while the page is alive; after refresh/unload, `exists` returns `false` with `{ reason:"transient-expired" }` so the UI can warn the user.
-  * A **clear warning** (the host app’s job): “Don’t close or refresh this tab.”
-
-### No DOM dependency
-
-* The module should be **UI-free**. No required HTML structure.
-* Offer optional **callbacks** for progress; **never** touch the DOM or rely on it.
-
-### Secure context & serving
-
-* Native handles require **secure context**. Document that consumers should host over **https** or `localhost`. `file://` is unreliable.
-
----
-
-## What the module deliberately does **not** do
-
-* **No snapshot fallback** or background caching of file bytes. This avoids both storage quotas and privacy concerns.
-* **No re-permission prompting automatically.** The caller **must** invoke `requestPermissions(key)` in response to a click/tap.
-* **No long-term schema migrations/versioning** (you don’t need them for week-scale jobs). Keep a single IDB version with two simple stores: `registry` and `nativeHandles`.
-
----
-
-## Operational extras for a WebRTC sender (you’ll add outside this module)
-
-* **Resumable transfers:** store **transfer metadata** (not bytes) separately (e.g., what has been sent, per-file byte offset). That can live in IDB and is safe cross-browser.
-* **Connection churn:** use `BroadcastChannel` or `storage` events if you need to coordinate multiple tabs (Chromium side), and **tab-uniqueness tokens** to avoid duplicate senders.
-* **Backpressure:** wire your WebRTC DataChannel’s bufferedAmount to chunk pacing; chunk sizes for very large files often work best around 64–512 KB, but your network will dictate tuning.
-
----
-
-## Edge cases to decide now
-
-* **Mixed input (some native handles + some legacy):**
-
-  * **Option A (simple):** if any non-native is present, register the entire set as **transient-session**.
-  * **Option B (max strength):** split into **two keys**, one native and one transient, and return both.
-    I’d pick **A** to keep the API single-key and predictable, unless you really want to micromanage.
-
-* **External drives:** if the drive unmounts/remounts, native handles may fail until re-selected. The module should report this as `partial:true` or “missing handle”.
-
-* **Counting policy:** your previous requirement was “recount on load.” Keep that as default; permit an opt-in `useCache:true` if you ever need faster UI.
-
----
-
-## Bottom line
-
-* Your **module boundary is right**: it **only** manages selections and their persistence level, with a **tiny API** and **no UI**.
-* Implement **two backends** (native & transient), with a small container that chooses and routes.
-* Offer clean, actionable error/permission states and **never** store bytes.
-* This will be **simple, robust, and reusable** for your WebRTC flow—and honest about Safari/Firefox limits while still enabling their one-off, keep-the-tab-open use case.
+The module was built for week-long WebRTC transfers of hundreds of gigabytes (e.g., uploading 100k photos or 100GB videos from a parent’s computer). Reliability beats absolute speed: Chromium users need durable handles that survive disconnects, while Safari/Firefox users need at least a transient attempt so they can send a single huge file if they keep the tab open. Migrations and multi-version schemas add risk for this scope, so the design deliberately keeps a single IndexedDB schema and favors determinism over bells and whistles.
+
+## Storage modes
+
+### Native-handle persistence (Chromium)
+- Triggered when every selected item is a `FileSystemFileHandle` or `FileSystemDirectoryHandle`.
+- Selections are normalized, deduped with `isSameEntry`, decorated with counts/timestamps, and stored under `nativeHandles` in IndexedDB via structured clone.
+- `getFileCount` performs a fresh traversal every time; missing entries mark the result as `{ partial:true, reason:'entries-missing' }`.
+- `requestPermissions(key)` must be called inside a user gesture whenever the browser loses `granted` status. The consumer is responsible for surfacing that CTA.
+
+### Transient-session fallback (Safari/Firefox/legacy)
+- Triggered when any selection entry is not a File System Access handle (dragged `File`, `webkitEntry`, etc.).
+- The module records the selection only in memory. A registry tombstone notes `{ storageType:'transient-session', status:'expired' }` once the tab unloads so later lookups explain the disappearance.
+- `getFileCount` and `exists` only work while the page is alive; once expired, they resolve to `{ ok:false, reason:'transient-expired' }`.
+- Callers must warn users to keep the tab open. Every harness page includes copy you can reuse.
+
+## Public API
+
+- `await fileStorageModule.init()` — lazily opens the registry (`registry` store) and native handle store (`nativeHandles`). Safe to call multiple times.
+- `await fileStorageModule.add(selection, metadata?)` — accepts anything array-like (single handle, array of handles/files, `DataTransferItemList`, etc.). Returns `{ ok, key, storageType }`. Throws no synchronous errors; failures surface as `{ ok:false, reason:'storage-failure' }`.
+- `await fileStorageModule.listKeys({ includeTransient = true } = {})` — returns merged registry keys plus live transient keys. Pass `includeTransient:false` for pure IndexedDB state (useful when rendering on load).
+- `await fileStorageModule.getStorageType(key)` — resolves `{ ok:true, storageType }` when known or `{ ok:false, reason }` when the key is missing/expired.
+- `await fileStorageModule.exists(key, { verifyPermissions = false } = {})` — for native keys, optionally call `queryPermission` to ensure `granted` before returning `{ exists:true }`. For transient keys, only reports true while this tab stores the session.
+- `await fileStorageModule.getFileCount(key)` — native mode recounts handles and may propagate traversal errors (`reason:'traversal-error'`). Transient mode summarizes the in-memory tree and returns the scheduled expiration timestamp so UIs can display countdowns.
+- `await fileStorageModule.remove(key)` — deletes both registry + backend data. Removing an already-expired transient key succeeds with `{ ok:true, reason:'transient-expired' }` so cleanup flows stay idempotent.
+- `await fileStorageModule.requestPermissions(key, options?)` — chromium-only helper that wraps each stored handle’s `requestPermission`. Returns `{ ok:true, state:'granted'|'denied'|'prompt' }` so the host app can branch on UI copy.
+
+## Registry & backend internals
+
+- IndexedDB stores live under the `file-storage-module` database with two object stores:
+  - `registry` (`keyPath:'key'`) — master list of selections and metadata (`storageType`, counts, created/updated timestamps, transient status).
+  - `nativeHandles` (`keyPath:'key'`) — structured-cloned arrays of native handles plus cached counts.
+- The module auto-creates missing stores and bumps versions when necessary. Each connection installs a `versionchange` handler that closes stale databases so upgrades are smooth.
+- Transient sessions never touch IndexedDB until they expire. On `beforeunload`, the backend removes in-memory entries, sets a tombstone in `registry`, and keeps a small cache so follow-up calls can report `transient-expired`.
+
+## Permissions, expiration, and multi-tab behavior
+
+- Native handles survive across tabs and windows because the data lives in IndexedDB. Permission state is per-handle, so every resumed session must call `exists({ verifyPermissions:true })` or `requestPermissions` before assuming access.
+- Transient sessions are tab-local. `listKeys()` merges registry keys with the current tab’s live session map so the UI can display “(transient, tab-local)” labels without another API call.
+- Expiration metadata (`{ createdAt, updatedAt, expires }`) is available through `transientSessions.getStatus` (wired into `exists`, `getFileCount`, and `remove`) so you can display countdown timers or reconciliation messages.
+
+## Example flows & harness pairings
+
+1. **Transfer kickoff (Chromium)** — Follow `ground_truth_baseline.html`: reset the registry, run `add`, list keys, recount via `getFileCount`, and verify the console summary. This mirrors the production UI path when a user selects one or more directories on Chrome/Edge.
+2. **Detecting drift / verifying mutations** — `ground_truth_mutations.html` loads a stored key, reruns `getFileCount`, and reports missing/new entries. Use the same flow in production before resuming a paused transfer so you can warn users about renamed or deleted files.
+3. **Transient expiration messaging** — `ground_truth_refresh.html`, `ground_truth_reopen.html`, and `ground_truth_transient_mutations.html` show the entire lifecycle: add a transient selection, observe the warning, refresh/close to confirm it vanishes, and inspect how stale `File` snapshots behave after external edits. Copy that copy into your Safari/Firefox UI.
+4. **Multi-tab coordination** — `ground_truth_multitab.html` surfaces tab IDs, shows that native keys synchronize instantly across tabs, and proves transient keys stay local. Use this to validate BroadcastChannel or storage-event messaging in the host app.
 
 ## Testing approach
 
-* **Node-based harness** — Use Vitest with `happy-dom` and `fake-indexeddb/auto` so every deterministic piece (registry utilities, backend routing, permission fallbacks) can be exercised quickly via `npm test`. Keep shared stubs for `FileSystemFileHandle` / `FileSystemDirectoryHandle` inside `tests/file_storage_module/` to simulate permission outcomes without relying on the browser.
-* **Browser smoke** — `npm run test:smoke` drives Chromium through `@web/test-runner/chrome`, loading `public/tests/file_storage_smoke.test.js`. The spec imports the production module, initializes the registry, and exercises an IndexedDB write/read so we know Chromium can run the shipped bundle headlessly. Point `web-test-runner.config.js` at your Chrome/Chromium binary (executable path + `--no-sandbox` flags when needed).
-  * The legacy `public/tests/file_storage_smoke.html` page still exists as a manual debug surface (buttons/logs) but is not part of the automated smoke command.
-* **Workflow expectations** — Run `npm test` after each ticket-level change; run `npm run test:smoke` whenever native-handle persistence or permission handling changes, and before tagging builds intended for actual transfers.
+- `npm test` / `npm run test:watch` — Vitest + `happy-dom` + `fake-indexeddb/auto`. Suites cover registry lifecycle, DB migrations, backend routing, permission plumbing, transient expiration, and contract-level API behavior.
+- `npm run test:smoke` — Web Test Runner + headless Chrome exercising `public/tests/file_storage_module/file_storage_smoke.test.js`. Confirms the production bundle loads and touches IndexedDB without console errors.
+- Manual harness pages in `public/tests/file_storage_module/` — baseline, refresh, reopen, multitab, mutations, and transient mutations. Copy `fixtures/ground-truth` somewhere Chrome can access (outside WSL sandboxes) before running them so counts match the deterministic manifest. Legacy pages (`file_storage_ground_truth.html`, `file_storage_smoke.html`) remain for ad-hoc debugging only.
+- See `docs/file_storage_module/README.md` for the full checklist and instructions on when to run each surface.
 
-If this plan looks good, I can sketch the exact TypeScript types and the IDB store layout next, then fill in implementations.
+## Deliberate exclusions
+
+- No snapshot or byte-copy backend (would explode storage quotas with 100GB+ files).
+- No automatic permission prompts — callers must drive `requestPermissions` from explicit user gestures.
+- No long-term schema migrations — a single DB version with self-healing store creation keeps the footprint small and predictable.
+
+## Operational notes for WebRTC transfers
+
+- Handle traversal can take minutes on 100k-file directories. Use the provided `TraversalOptions` (AbortSignal + optional `onProgress`) when invoking `getFileCount` or future enumeration helpers so the UI can stay responsive.
+- Treat `getFileCount` results as a health check before resuming a transfer. Partial results mean you should prompt the user to reselect or repair the selection.
+- If you later add read/stream APIs, rely on `FileSystemFileHandle.getFile()` and `File.stream()` so you can send data in predictable chunks without buffering entire files in memory.

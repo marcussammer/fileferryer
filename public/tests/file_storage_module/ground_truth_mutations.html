@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ground Truth – Mutations</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.92);
+        border-radius: 0.75rem;
+        padding: 2rem;
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 1rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 360px;
+        overflow: auto;
+      }
+      .summary-row {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.15);
+      }
+      .summary-row.pass .summary-status {
+        color: #4ade80;
+      }
+      .summary-row.fail .summary-status {
+        color: #f87171;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Ground Truth – Mutations</h1>
+      <p>
+        This harness proves what happens to existing <strong>native</strong>
+        handles after the underlying files change. Use it both before and after
+        you mutate the copied fixture directory so you can capture how many files
+        still resolve, which ones disappeared, and whether new files appeared.
+      </p>
+      <ol>
+        <li>
+          Run the Baseline harness so at least one native key exists for the
+          fixture copy (outside WSL if needed).
+        </li>
+        <li>
+          Use <strong>Refresh Native Keys</strong> and pick the key you want to
+          validate. Click <strong>Revalidate Handles</strong> before editing
+          anything to capture the “clean” state.
+        </li>
+        <li>
+          Rename/delete/add files in the copied directory, then click
+          <strong>Revalidate Handles</strong> again to see which handles broke or
+          what new files appeared. (File handles still point to the same objects,
+          so modified contents will report new `size`/`lastModified` stamps.)
+        </li>
+      </ol>
+      <p class="status" id="status">Idle</p>
+      <div class="controls">
+        <button id="refreshKeys">Refresh Native Keys</button>
+        <select id="keySelect"></select>
+        <button id="revalidate">Revalidate Handles</button>
+      </div>
+      <div id="summary"></div>
+      <pre id="log">Waiting…</pre>
+    </div>
+    <script type="module">
+      import fileStorageModule from '../../js/fileStorageModule.mjs';
+      import {
+        setupHarness,
+        compareCounts
+      } from './harness/harnessUtils.js';
+      import {
+        groundTruthCounts,
+        groundTruthEntries,
+        groundTruthTree
+      } from './fixtures/groundTruthManifest.js';
+
+      const harness = setupHarness();
+      const refreshBtn = document.getElementById('refreshKeys');
+      const revalidateBtn = document.getElementById('revalidate');
+      const keySelect = document.getElementById('keySelect');
+
+      const expectedFileSet = new Set(
+        groundTruthEntries
+          .filter((entry) => entry.kind === 'file')
+          .map((entry) => entry.path)
+      );
+
+      const populateKeys = async () => {
+        harness.setStatus('Loading native keys…');
+        keySelect.innerHTML = '';
+        keySelect.disabled = true;
+        try {
+          await fileStorageModule.init();
+          const keys = await fileStorageModule.listKeys({ includeTransient: false });
+          const nativeRecords = [];
+          for (const key of keys) {
+            const storage = await fileStorageModule.getStorageType(key);
+            if (storage.ok && storage.storageType === 'native-handle') {
+              const record = await fileStorageModule.registry.getRecord(key);
+              if (record) {
+                nativeRecords.push(record);
+              }
+            }
+          }
+          if (!nativeRecords.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No native selections found';
+            keySelect.appendChild(option);
+            harness.setStatus('Run the baseline harness first.', 'error');
+            return;
+          }
+
+          nativeRecords.forEach((record) => {
+            const option = document.createElement('option');
+            option.value = record.key;
+            option.textContent = `${record.key} – ${new Date(
+              record.createdAt ?? Date.now()
+            ).toLocaleString()}`;
+            keySelect.appendChild(option);
+          });
+          keySelect.disabled = false;
+          harness.setStatus('Select a key and click Revalidate Handles', 'success');
+        } catch (error) {
+          harness.setStatus('Failed to load keys', 'error');
+          harness.log('mutations.keys.error', { message: error?.message });
+        }
+      };
+
+      const traverseStoredHandles = async (handles) => {
+        const files = new Set();
+        const directories = new Set();
+        const missingFiles = [];
+        const traversalErrors = [];
+        const fileStats = [];
+
+        const walkDirectory = async (directoryHandle, relativePath = '') => {
+          directories.add(relativePath || groundTruthTree.name);
+          const iterator = directoryHandle.values?.();
+          if (!iterator || typeof iterator[Symbol.asyncIterator] !== 'function') {
+            traversalErrors.push({
+              path: relativePath,
+              reason: 'Directory handle is not iterable'
+            });
+            return;
+          }
+          for await (const entry of iterator) {
+            const childPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+            if (entry.kind === 'file') {
+              try {
+                const file = await entry.getFile();
+                files.add(childPath);
+                fileStats.push({
+                  path: childPath,
+                  status: 'ok',
+                  size: file.size,
+                  lastModified: file.lastModified
+                });
+              } catch (error) {
+                missingFiles.push({
+                  path: childPath,
+                  reason: error?.message ?? 'getFile failed'
+                });
+              }
+            } else if (entry.kind === 'directory') {
+              await walkDirectory(entry, childPath);
+            }
+          }
+        };
+
+        for (const handle of handles ?? []) {
+          if (handle.kind === 'file') {
+            try {
+              const file = await handle.getFile();
+              files.add(handle.name);
+              fileStats.push({
+                path: handle.name,
+                status: 'ok',
+                size: file.size,
+                lastModified: file.lastModified
+              });
+            } catch (error) {
+              missingFiles.push({
+                path: handle.name,
+                reason: error?.message ?? 'getFile failed'
+              });
+            }
+          } else if (handle.kind === 'directory') {
+            await walkDirectory(handle, '');
+          }
+        }
+
+        return { files, directories, missingFiles, traversalErrors, fileStats };
+      };
+
+      const revalidate = async () => {
+        const key = keySelect.value;
+        if (!key) {
+          harness.report('revalidate', false, 'Select a native key first');
+          return;
+        }
+        harness.resetSummary();
+        harness.setStatus('Revalidating stored handles…');
+        try {
+          await fileStorageModule.init();
+          const record = await fileStorageModule.nativeHandles.getRecord(key);
+          if (!record) {
+            harness.report('revalidate', false, 'Native record not found for key');
+            harness.setStatus('Missing native record', 'error');
+            return;
+          }
+
+          const result = await traverseStoredHandles(record.handles);
+          compareCounts({
+            label: 'current.counts',
+            counts: {
+              files: result.files.size,
+              directories: result.directories.size
+            },
+            expected: groundTruthCounts,
+            report: harness.report
+          });
+
+          harness.report(
+            'handles.missing-files',
+            result.missingFiles.length === 0,
+            result.missingFiles.length
+              ? result.missingFiles.map((item) => item.path).join(', ')
+              : 'None'
+          );
+
+          harness.report(
+            'handles.errors',
+            result.traversalErrors.length === 0,
+            result.traversalErrors.length
+              ? result.traversalErrors.map((item) => item.reason).join(', ')
+              : 'None'
+          );
+
+          const missingExpected = [...expectedFileSet].filter(
+            (path) => !result.files.has(path)
+          );
+          const unexpectedFiles = [...result.files].filter(
+            (path) => !expectedFileSet.has(path)
+          );
+
+          harness.report(
+            'files.expected-but-missing',
+            missingExpected.length === 0,
+            missingExpected.length ? missingExpected.join(', ') : 'None'
+          );
+
+          harness.report(
+            'files.new-since-selection',
+            unexpectedFiles.length === 0,
+            unexpectedFiles.length ? unexpectedFiles.join(', ') : 'None'
+          );
+
+          harness.log('handles.file-stats', result.fileStats);
+          harness.setStatus('Revalidation complete', 'success');
+        } catch (error) {
+          harness.report('revalidate.error', false, error?.message ?? 'Unknown error');
+          harness.setStatus('Revalidation failed', 'error');
+          harness.log('revalidate.error', {
+            message: error?.message,
+            stack: error?.stack
+          });
+        }
+      };
+
+      refreshBtn.addEventListener('click', () => {
+        refreshBtn.disabled = true;
+        populateKeys().finally(() => {
+          refreshBtn.disabled = false;
+        });
+      });
+
+      revalidateBtn.addEventListener('click', () => {
+        revalidateBtn.disabled = true;
+        revalidate().finally(() => {
+          revalidateBtn.disabled = false;
+        });
+      });
+
+      populateKeys();
+      harness.log('mutations.ready', {
+        instructions: 'Select a key added via the baseline harness, then mutate files and re-run.'
+      });
+    </script>
+  </body>
+</html>

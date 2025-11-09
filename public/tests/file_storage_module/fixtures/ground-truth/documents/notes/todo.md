@@ -1,0 +1,3 @@
+- Gather photos
+- Export raw footage
+- Verify checksums
