@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Browser ID Module – Multi-tab Harness</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 2rem;
+        background: rgba(15, 23, 42, 0.94);
+        border-radius: 0.75rem;
+        box-shadow: 0 20px 45px rgba(2, 6, 23, 0.4);
+      }
+      h1 {
+        margin-top: 0;
+      }
+      .ids {
+        margin: 1rem 0;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        font-family: Menlo, Consolas, Monaco, 'Courier New', monospace;
+        line-height: 1.5;
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #16a34a;
+        color: #fff;
+        cursor: pointer;
+        font-size: 1rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      button:nth-child(2) {
+        background: #2563eb;
+      }
+      button:nth-child(3) {
+        background: #d97706;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .status {
+        margin: 1rem 0;
+        font-weight: 600;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 320px;
+        overflow: auto;
+      }
+      a {
+        color: #93c5fd;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Browser ID Module – Multi-tab Harness</h1>
+      <p>
+        Validate duplicate-tab recovery by opening this page twice (or using the
+        browser’s <em>Duplicate Tab</em> action). One tab keeps the original Tab
+        ID, while the other regenerates after the HELLO handshake resolves
+        collisions.
+      </p>
+      <ol>
+        <li>
+          Open <a href="tab_identity_baseline.html">tab_identity_baseline.html</a>
+          first to ensure you understand the IDs.
+        </li>
+        <li>
+          Open this page in Tab A and click <strong>Record Snapshot</strong>.
+        </li>
+        <li>
+          Duplicate the tab (or open a new one) and click
+          <strong>Record Snapshot</strong> there too. Both tabs temporarily share
+          the same Tab ID.
+        </li>
+        <li>
+          Click <strong>Probe For Duplicates</strong> in both tabs. One tab will
+          report <em>collision resolved</em> and show a new Tab ID, the other
+          confirms it retained the original ID.
+        </li>
+        <li>
+          Use <strong>Force Rename</strong> to manually regenerate the ID if you
+          need to re-run the experiment without duplicating again.
+        </li>
+      </ol>
+      <div class="ids" id="ids">Waiting for data…</div>
+      <div class="status" id="status" data-tone="info">Idle</div>
+      <div class="controls">
+        <button id="snapshot">Record Snapshot</button>
+        <button id="probe">Probe For Duplicates</button>
+        <button id="force">Force Rename This Tab</button>
+      </div>
+      <pre id="log">Waiting…</pre>
+      <p>
+        Need to return to the file storage flows?
+        <a href="../file_storage_module/ground_truth_multitab.html"
+          >Open the shared multi-tab harness</a
+        >
+        to see how the IDs surface inside transfer workflows.
+      </p>
+    </div>
+    <script type="module">
+      import browserIdModule from '../../js/browserIdModule.mjs';
+
+      const idsEl = document.getElementById('ids');
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const snapshotBtn = document.getElementById('snapshot');
+      const probeBtn = document.getElementById('probe');
+      const forceBtn = document.getElementById('force');
+
+      const appendLog = (label, payload) => {
+        const entry = `${new Date().toISOString()} :: ${label}\n${JSON.stringify(
+          payload,
+          null,
+          2
+        )}`;
+        logEl.textContent =
+          logEl.textContent === 'Waiting…'
+            ? entry
+            : `${entry}\n\n${logEl.textContent}`;
+      };
+
+      const setStatus = (text, tone = 'info') => {
+        statusEl.textContent = text;
+        statusEl.dataset.tone = tone;
+      };
+
+      const renderSnapshot = (ids) => {
+        idsEl.innerHTML = `
+          <div>Browser ID: <code>${ids.browserId}</code></div>
+          <div>Tab ID: <code>${ids.tabId}</code></div>
+          <div>Regenerated this run: <strong>${ids.didRegenerateTabId ? 'Yes' : 'No'}</strong></div>
+        `;
+      };
+
+      const runSnapshot = async () => {
+        snapshotBtn.disabled = true;
+        setStatus('Capturing snapshot…');
+        try {
+          const ids = await browserIdModule.getTabIdentity({
+            fresh: true,
+            collisionWindowMs: 250
+          });
+          renderSnapshot(ids);
+          appendLog('snapshot', ids);
+          setStatus('Snapshot captured', 'success');
+        } catch (error) {
+          appendLog('snapshot.error', { message: error?.message });
+          setStatus('Snapshot failed', 'error');
+        } finally {
+          snapshotBtn.disabled = false;
+        }
+      };
+
+      const runProbe = async () => {
+        probeBtn.disabled = true;
+        setStatus('Probing for duplicate IDs…');
+        try {
+          const ids = await browserIdModule.getTabIdentity({
+            fresh: true,
+            collisionWindowMs: 2000
+          });
+          renderSnapshot(ids);
+          appendLog(ids.didRegenerateTabId ? 'collision.resolved' : 'collision.none', ids);
+          setStatus(
+            ids.didRegenerateTabId
+              ? 'Collision resolved in this tab'
+              : 'No collision detected for this tab',
+            ids.didRegenerateTabId ? 'success' : 'info'
+          );
+        } catch (error) {
+          appendLog('probe.error', { message: error?.message });
+          setStatus('Probe failed', 'error');
+        } finally {
+          probeBtn.disabled = false;
+        }
+      };
+
+      const harnessInstanceId =
+        globalThis?.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+      const PROBE_CHANNEL = 'tab-identity-harness';
+      const PROBE_STORAGE_KEY = `${PROBE_CHANNEL}:bus`;
+
+      const createProbeMessenger = () => {
+        const listeners = new Set();
+        let bc = null;
+
+        const emit = (payload) => {
+          for (const listener of listeners) {
+            try {
+              listener(payload);
+            } catch {
+              // Ignore listener failures so other tabs still respond.
+            }
+          }
+        };
+
+        if (typeof BroadcastChannel === 'function') {
+          try {
+            bc = new BroadcastChannel(PROBE_CHANNEL);
+            bc.addEventListener('message', (event) => emit(event?.data));
+          } catch {
+            bc = null;
+          }
+        }
+
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+          window.addEventListener('storage', (event) => {
+            if (event.key !== PROBE_STORAGE_KEY || !event.newValue) {
+              return;
+            }
+            try {
+              const parsed = JSON.parse(event.newValue);
+              if (parsed?.msg) {
+                emit(parsed.msg);
+              }
+            } catch {
+              // Ignore malformed payloads from other contexts.
+            }
+          });
+        }
+
+        const post = (msg) => {
+          if (bc && typeof bc.postMessage === 'function') {
+            try {
+              bc.postMessage(msg);
+            } catch {
+              // BroadcastChannel is best-effort; fall through to storage.
+            }
+          }
+          try {
+            const storage = window?.localStorage;
+            storage?.setItem(
+              PROBE_STORAGE_KEY,
+              JSON.stringify({
+                msg,
+                ts: Date.now(),
+                rand: Math.random()
+              })
+            );
+          } catch {
+            // Ignore storage failures (Safari private mode, etc.).
+          }
+        };
+
+        const onMessage = (fn) => {
+          if (typeof fn !== 'function') {
+            return () => {};
+          }
+          listeners.add(fn);
+          return () => listeners.delete(fn);
+        };
+
+        return { post, onMessage };
+      };
+
+      const probeMessenger = createProbeMessenger();
+      const recentProbeIds = [];
+      const seenProbeIds = new Set();
+      const rememberProbeRequest = (id) => {
+        if (!id || seenProbeIds.has(id)) {
+          return false;
+        }
+        seenProbeIds.add(id);
+        recentProbeIds.push(id);
+        if (recentProbeIds.length > 32) {
+          const oldest = recentProbeIds.shift();
+          seenProbeIds.delete(oldest);
+        }
+        return true;
+      };
+
+      const handleProbeRequest = (payload) => {
+        if (!payload || payload.type !== 'probe') {
+          return;
+        }
+        if (payload.senderId === harnessInstanceId) {
+          return;
+        }
+        if (!rememberProbeRequest(payload.requestId)) {
+          return;
+        }
+        appendLog('probe.remoteTrigger', {
+          requestId: payload.requestId,
+          senderId: payload.senderId,
+          receivedAt: new Date().toISOString()
+        });
+        runProbe();
+      };
+
+      probeMessenger.onMessage(handleProbeRequest);
+
+      const broadcastProbeRequest = () => {
+        const request = {
+          type: 'probe',
+          requestId:
+            globalThis?.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2),
+          senderId: harnessInstanceId,
+          ts: Date.now()
+        };
+        rememberProbeRequest(request.requestId);
+        probeMessenger.post(request);
+        appendLog('probe.broadcast', { requestId: request.requestId });
+      };
+
+      const runForceRename = async () => {
+        forceBtn.disabled = true;
+        setStatus('Regenerating tab ID…');
+        try {
+          const ids = await browserIdModule.refreshTabId({
+            collisionWindowMs: 300
+          });
+          renderSnapshot(ids);
+          appendLog('tab.forceRename', ids);
+          setStatus('Tab ID regenerated manually', 'success');
+        } catch (error) {
+          appendLog('force.error', { message: error?.message });
+          setStatus('Unable to rename tab', 'error');
+        } finally {
+          forceBtn.disabled = false;
+        }
+      };
+
+      snapshotBtn.addEventListener('click', runSnapshot);
+      probeBtn.addEventListener('click', () => {
+        broadcastProbeRequest();
+        runProbe();
+      });
+      forceBtn.addEventListener('click', runForceRename);
+
+      runSnapshot();
+    </script>
+  </body>
+</html>

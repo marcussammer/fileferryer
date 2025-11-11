@@ -105,7 +105,7 @@
         createTransientPicker,
         assertTransientState
       } from './harness/harnessUtils.js';
-      import { getBrowserTabID } from '../js/getBrowserTabID.js';
+      import browserIdModule from '../../js/browserIdModule.mjs';
 
       const harness = setupHarness();
       const idsEl = document.getElementById('ids');
@@ -116,7 +116,7 @@
 
       const renderIds = async () => {
         try {
-          const ids = await getBrowserTabID();
+          const ids = await browserIdModule.getTabIdentity();
           idsEl.innerHTML = `
             <div>Browser ID: <code>${ids.browserId}</code></div>
             <div>Tab ID: <code>${ids.tabId}</code></div>

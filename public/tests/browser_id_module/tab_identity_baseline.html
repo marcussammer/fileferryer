@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Browser ID Module – Baseline Harness</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+      }
+      .card {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 2rem;
+        background: rgba(15, 23, 42, 0.94);
+        border-radius: 0.75rem;
+        box-shadow: 0 20px 45px rgba(2, 6, 23, 0.4);
+      }
+      h1 {
+        margin-top: 0;
+      }
+      button {
+        padding: 0.65rem 1.25rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: #fff;
+        cursor: pointer;
+        font-size: 1rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .ids {
+        margin: 1rem 0;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        font-family: Menlo, Consolas, Monaco, 'Courier New', monospace;
+        line-height: 1.5;
+      }
+      .status {
+        margin: 1rem 0;
+        font-weight: 600;
+      }
+      .status[data-tone='error'] {
+        color: #f87171;
+      }
+      .status[data-tone='success'] {
+        color: #4ade80;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        max-height: 320px;
+        overflow: auto;
+      }
+      a {
+        color: #93c5fd;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Browser ID Module – Baseline Harness</h1>
+      <p>
+        Use this page to sanity-check the browser ID module in a single tab. The
+        <em>Browser ID</em> should remain stable across tabs and reloads, while
+        the <em>Tab ID</em> stays scoped to this tab unless you explicitly
+        refresh it.
+      </p>
+      <ol>
+        <li>Click <strong>Fetch Current IDs</strong> after loading the page.</li>
+        <li>
+          Reload the page and click fetch again. The Browser ID should match, but
+          the Tab ID remains identical because it is tied to this tab.
+        </li>
+        <li>
+          Click <strong>Force Refresh Tab ID</strong> to prove the module can
+          deliberately rotate a tab identity without affecting the browser-level
+          identifier.
+        </li>
+        <li>
+          Use <strong>Reset Session State</strong> if you want to clear
+          `sessionStorage`, `window.name`, and cached values before repeating the
+          flow.
+        </li>
+      </ol>
+      <div class="ids" id="ids">Loading tab info…</div>
+      <div class="status" id="status" data-tone="info">Idle</div>
+      <div class="controls">
+        <button id="fetch">Fetch Current IDs</button>
+        <button id="refresh">Force Refresh Tab ID</button>
+        <button id="reset">Reset Session State</button>
+      </div>
+      <pre id="log">Ready.</pre>
+      <p>
+        Next: open <a href="tab_identity_multitab.html">Multi-tab harness →</a>
+        to verify duplicate-tab recovery.
+      </p>
+    </div>
+    <script type="module">
+      import browserIdModule from '../../js/browserIdModule.mjs';
+
+      const idsEl = document.getElementById('ids');
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const fetchBtn = document.getElementById('fetch');
+      const refreshBtn = document.getElementById('refresh');
+      const resetBtn = document.getElementById('reset');
+
+      const log = (label, payload) => {
+        const entry = { ts: new Date().toISOString(), label, payload };
+        const existing = logEl.textContent === 'Ready.' ? [] : JSON.parse(logEl.dataset.logs ?? '[]');
+        existing.push(entry);
+        logEl.dataset.logs = JSON.stringify(existing);
+        logEl.textContent = existing
+          .map((item) => `${item.ts} :: ${item.label}\n${JSON.stringify(item.payload, null, 2)}`)
+          .join('\n\n');
+      };
+
+      const setStatus = (text, tone = 'info') => {
+        statusEl.textContent = text;
+        statusEl.dataset.tone =
+          tone === 'success' || tone === 'error' ? tone : 'info';
+      };
+
+      const renderIds = async (options = {}) => {
+        fetchBtn.disabled = true;
+        setStatus('Resolving IDs…');
+        try {
+          const ids = await browserIdModule.getTabIdentity({
+            ...options,
+            collisionWindowMs: 250
+          });
+          idsEl.innerHTML = `
+            <div>Browser ID: <code>${ids.browserId}</code></div>
+            <div>Tab ID: <code>${ids.tabId}</code></div>
+            <div>Regenerated this run: <strong>${ids.didRegenerateTabId ? 'Yes' : 'No'}</strong></div>
+          `;
+          log(options.forceRegenerate ? 'tab.refresh' : 'tab.fetch', ids);
+          setStatus('IDs resolved', 'success');
+        } catch (error) {
+          idsEl.textContent = 'Unable to resolve IDs.';
+          log('tab.error', { message: error?.message });
+          setStatus('Failed to resolve IDs', 'error');
+        } finally {
+          fetchBtn.disabled = false;
+        }
+      };
+
+      fetchBtn.addEventListener('click', () => renderIds({ fresh: true }));
+      refreshBtn.addEventListener('click', async () => {
+        refreshBtn.disabled = true;
+        setStatus('Refreshing tab ID…');
+        try {
+          const ids = await browserIdModule.refreshTabId({
+            collisionWindowMs: 250
+          });
+          idsEl.innerHTML = `
+            <div>Browser ID: <code>${ids.browserId}</code></div>
+            <div>Tab ID: <code>${ids.tabId}</code></div>
+            <div>Regenerated this run: <strong>${ids.didRegenerateTabId ? 'Yes' : 'No'}</strong></div>
+          `;
+          log('tab.forceRefresh', ids);
+          setStatus('Tab ID refreshed', 'success');
+        } catch (error) {
+          log('tab.refresh.error', { message: error?.message });
+          setStatus('Refresh failed', 'error');
+        } finally {
+          refreshBtn.disabled = false;
+        }
+      });
+
+      resetBtn.addEventListener('click', () => {
+        browserIdModule.resetCache();
+        try {
+          sessionStorage.removeItem('ft.tabId');
+          window.name = '';
+        } catch {
+          // ignore
+        }
+        try {
+          localStorage.removeItem('ft.browserId');
+        } catch {
+          // ignore
+        }
+        log('tab.reset', { message: 'Session + cache cleared' });
+        setStatus('Session cleared; fetch again to mint IDs.');
+        idsEl.textContent = 'Cleared. Click “Fetch Current IDs” to mint new values.';
+      });
+
+      renderIds();
+    </script>
+  </body>
+</html>
